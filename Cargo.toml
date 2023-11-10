@@ -1,0 +1,21 @@
+[package]
+name = "azindex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+azure_core = { version = "0.17.0", features = ["reqwest", "tokio", "enable_reqwest_rustls"] }
+azure_identity = { version = "0.17.0", features = ["enable_reqwest_rustls"] }
+azure_mgmt_compute = { version = "0.17.0", features = ["enable_reqwest_rustls"] }
+azure_mgmt_subscription = { version = "0.17.0", features = ["enable_reqwest_rustls"] }
+chrono = { version = "0.4.31", features = ["serde"] }
+chrono-humanize = "0.2.3"
+clap = { version = "4.4.2", features = ["derive"] }
+futures = "0.3.29"
+reqwest = { version = "0.11.22", features = ["rustls", "rustls-tls-webpki-roots", "serde_json", "json"] }
+scraper = "0.18.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.32.0", features=["full"] }
+tokio-stream = "0.1.14"
+xlsxwriter = "0.6.0"
