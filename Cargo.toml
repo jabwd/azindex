@@ -12,6 +12,7 @@ chrono = { version = "0.4.31", features = ["serde"] }
 chrono-humanize = "0.2.3"
 clap = { version = "4.4.2", features = ["derive"] }
 futures = "0.3.29"
+paris = { version = "1.5.15", features = ["macros"] }
 reqwest = { version = "0.11.22", features = ["rustls", "rustls-tls-webpki-roots", "serde_json", "json"] }
 scraper = "0.18.1"
 serde = { version = "1.0", features = ["derive"] }
