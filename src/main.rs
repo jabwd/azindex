@@ -171,13 +171,13 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
     let workbook = Workbook::new_with_options(file.to_str().unwrap(), true, None, false)?;
     let mut sheet = workbook.add_worksheet(None)?;
 
-    let header_format = Format::new().set_bold().set_bg_color(FormatColor::Gray).set_font_color(FormatColor::White).clone();
+    let header_format = Format::new().set_bold().set_bg_color(FormatColor::Gray).set_font_color(FormatColor::White).set_border_bottom(FormatBorder::Medium).clone();
     let header_format = Some(&header_format);
-    let eol_style = Format::new().set_bold().set_bg_color(FormatColor::Red).set_font_color(FormatColor::Black).clone();
+    let eol_style = Format::new().set_bold().set_bg_color(FormatColor::Custom(0xF5_CA_C9)).set_font_color(FormatColor::Custom(0x8D_20_12)).clone();
     let eol_style = Some(&eol_style);
-    let unknown_style = Format::new().set_bold().set_bg_color(FormatColor::Yellow).set_font_color(FormatColor::Black).clone();
+    let unknown_style = Format::new().set_bold().set_bg_color(FormatColor::Custom(0xFA_EC_A2)).set_font_color(FormatColor::Custom(0x915C17)).clone();
     let unknown_style = Some(&unknown_style);
-    let green_style = Format::new().set_bold().set_bg_color(FormatColor::Green).set_font_color(FormatColor::Black).clone();
+    let green_style = Format::new().set_bold().set_bg_color(FormatColor::Custom(0xCF_ED_CF)).set_font_color(FormatColor::Custom(0x295F10)).clone();
     let green_style = Some(&green_style);
 
     sheet.write_string(0, 0, "Detected version", header_format)?;
