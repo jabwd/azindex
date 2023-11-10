@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 #[derive(Deserialize, Debug)]
 pub struct EOLEntity {
     pub cycle: String,
-    pub lts: bool,
+    // pub lts: bool,
     #[serde(rename(deserialize = "releaseDate"))]
     pub release_date: NaiveDate,
     pub latest: String,

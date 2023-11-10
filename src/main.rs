@@ -1,24 +1,19 @@
+mod eol_detection;
+mod vmresult;
+
 use azure_identity::AzureCliCredential;
-use azure_mgmt_compute::models::os_disk::OsType;
 use futures::stream::StreamExt;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Receiver, Sender};
 use std::fs::File;
-use std::io::BufWriter;
-use std::io::Write;
-use tokio::sync::mpsc;
-use tokio::sync::Mutex;
-use xlsxwriter::prelude::*;
-use paris::Logger;
-use paris::error;
-
-mod ubuntu;
-mod centos;
-mod windows;
-mod eol;
-
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use tokio::sync::{mpsc, Mutex};
+use xlsxwriter::prelude::*;
+use paris::{Logger, error};
 use clap::Parser;
+
+use vmresult::VMResult;
+use eol_detection::{centos, windows, ubuntu, redhat};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -117,29 +112,50 @@ async fn list_vms(subscription_id: &String, client: &azure_mgmt_compute::Client,
     vms.for_each_concurrent(10, |vms| async {
         if let Ok(vms) = vms {
             for vm in vms.value {
-                if let Some(properties) = vm.properties {
-                    let storage_profile = properties.storage_profile.unwrap();
-                    let image_reference = storage_profile.image_reference.unwrap();
-                    let os_disk = storage_profile.os_disk.unwrap();
-                    let sku = image_reference.sku.unwrap();
-                    
-                    let resource_id = vm.resource.id.unwrap_or_default();
-                    // info!("Found VM: {}", &resource_id);
-                    let machine = VMResult {
-                        id: resource_id,
-                        subscription_id: subscription_id.clone(),
-                        publisher: image_reference.publisher.unwrap_or_default(),
-                        offer: image_reference.offer.unwrap_or_default(),
-                        sku: sku.clone(),
-                        version: image_reference.version.unwrap_or_default(),
-                        exact_version: image_reference.exact_version.unwrap_or_default(),
-                        os_type: os_disk.os_type.unwrap(),
-                    };
-                    let tx = tx.lock().await;
-                    _ = tx.send(machine).await;
-                } else {
-                    error!("No properties found for VM {:?}", vm.resource.id);
-                }
+                let properties = match vm.properties {
+                    Some(p) => p,
+                    None => {
+                        error!("No properties found for: {}", vm.resource.id.unwrap_or_default());
+                        continue;
+                    },
+                };
+                let storage_profile = match properties.storage_profile {
+                    Some(p) => p,
+                    None => {
+                        error!("No storage profile found for: {}", vm.resource.id.unwrap_or_default());
+                        continue;
+                    },
+                };
+                let image_info = {
+                    if let Some(r) = storage_profile.image_reference {
+                        (r.sku.unwrap_or_default(), r.publisher.unwrap_or_default(), r.offer.unwrap_or_default(), r.version.unwrap_or_default(), r.exact_version.unwrap_or_default())
+                    } else {
+                        ("".to_string(), "".to_string(), "".to_string(), "".to_string(), "".to_string())
+                    }
+                };
+                let os_disk = match storage_profile.os_disk {
+                    Some(p) => p,
+                    None => {
+                        error!("No OS disk found for: {}", vm.resource.id.unwrap_or_default());
+                        continue;
+                    },
+                };
+                let sku = image_info.0;
+                
+                let resource_id = vm.resource.id.unwrap_or_default();
+                // info!("Found VM: {}", &resource_id);
+                let machine = VMResult {
+                    id: resource_id,
+                    subscription_id: subscription_id.clone(),
+                    publisher: image_info.1,
+                    offer: image_info.2,
+                    sku: sku.clone(),
+                    version: image_info.3,
+                    exact_version: image_info.4,
+                    os_type: os_disk.os_type,
+                };
+                let tx = tx.lock().await;
+                _ = tx.send(machine).await;
             }
         }
     })
@@ -150,6 +166,7 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
     let ubuntu_eol = ubuntu::list().await?;
     let centos_eol = centos::list().await?;
     let windows_eol = windows::list().await?;
+    let redhat_eol = redhat::list().await?;
 
     let workbook = Workbook::new_with_options(file.to_str().unwrap(), true, None, false)?;
     let mut sheet = workbook.add_worksheet(None)?;
@@ -177,7 +194,7 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
     let mut row_idx = 1;
     while let Some(vm) = rx.recv().await {
         let version_info: (String, String) = {
-            if vm.os_type == OsType::Linux && vm.offer.to_lowercase().contains("ubuntu") {
+            if vm.offer.to_lowercase().contains("ubuntu") {
                 let version = ubuntu::parse_azure_version(&vm.sku);
                 let is_outdated = ubuntu::is_outdated(&vm, &ubuntu_eol);
                 (version.unwrap_or_default(), is_outdated)
@@ -188,6 +205,10 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
             } else if vm.offer.to_lowercase().contains("windows") {
                 let version = windows::parse_azure_version(&vm.sku);
                 let is_outdated = windows::is_outdated(&vm, &windows_eol);
+                (version.unwrap_or_default(), is_outdated)
+            } else if vm.offer.to_lowercase().contains("rhel") {
+                let version = redhat::parse_azure_version(&vm.sku);
+                let is_outdated = redhat::is_outdated(&vm, &redhat_eol);
                 (version.unwrap_or_default(), is_outdated)
             } else {
                 (String::from(""), String::from("--"))
@@ -204,9 +225,17 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
             }
         };
 
+        let os_type = {
+            if let Some(os_type) = vm.os_type {
+                format!("{:?}", os_type)
+            } else {
+                String::from("--")
+            }
+        };
+
         sheet.write_string(row_idx, 0, &version_info.0, None)?;
         sheet.write_string(row_idx, 1, &version_info.1, deprecated_sytle)?;
-        sheet.write_string(row_idx, 2, format!("{:?}", vm.os_type).as_str(), None)?;
+        sheet.write_string(row_idx, 2, &os_type.as_str(), None)?;
         sheet.write_string(row_idx, 3, &vm.subscription_id, None)?;
         sheet.write_string(row_idx, 4, &vm.offer, None)?;
         sheet.write_string(row_idx, 5, &vm.sku, None)?;
@@ -233,7 +262,7 @@ async fn write_to_csv(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<(), 
 
     while let Some(vm) = rx.recv().await {
         let version_info: (String, String) = {
-            if vm.os_type == OsType::Linux && vm.offer.to_lowercase().contains("ubuntu") {
+            if vm.offer.to_lowercase().contains("ubuntu") {
                 let version = ubuntu::parse_azure_version(&vm.sku);
                 let is_outdated = ubuntu::is_outdated(&vm, &ubuntu_eol);
                 (version.unwrap_or_default(), is_outdated)
@@ -258,22 +287,4 @@ async fn write_to_csv(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<(), 
     }
 
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-pub struct VMResult {
-    pub id: String,
-    pub subscription_id: String,
-    pub publisher: String,
-    pub offer: String,
-    pub sku: String,
-    pub version: String,
-    pub exact_version: String,
-    pub os_type: OsType,
-}
-
-impl VMResult {
-    fn csv_header_line() -> String {
-        String::from("Deprecated;Version (detected);ID;OS;Subscription;Publisher;Offer;SKU;Version;Exact version\n")
-    }
 }

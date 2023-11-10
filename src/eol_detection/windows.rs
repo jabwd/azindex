@@ -1,9 +1,9 @@
 use crate::VMResult;
-use crate::eol::{fetch_eol, EOLEntity};
+use crate::eol_detection::eol::{fetch_eol, EOLEntity};
 use reqwest::Error;
 
 pub async fn list() -> Result<Vec<EOLEntity>, Error> {
-    fetch_eol("centos").await
+    fetch_eol("windowsserver").await
 }
 
 pub fn is_outdated(vm: &VMResult, eol_list: &Vec<EOLEntity>) -> String {
@@ -32,7 +32,7 @@ pub fn is_outdated(vm: &VMResult, eol_list: &Vec<EOLEntity>) -> String {
 pub fn parse_azure_version(az_version: &String) -> Option<String> {
     // Examples:
     // 18.04-LTS, 20_04-lts-gen2
-    let parts: Vec<&str> = az_version.split(".").collect();
+    let parts: Vec<&str> = az_version.split("-").collect();
     if parts.is_empty() {
         return None;
     }

@@ -1,9 +1,9 @@
 use crate::VMResult;
-use crate::eol::{fetch_eol, EOLEntity};
+use crate::eol_detection::eol::{fetch_eol, EOLEntity};
 use reqwest::Error;
 
 pub async fn list() -> Result<Vec<EOLEntity>, Error> {
-    fetch_eol("windowsserver").await
+    fetch_eol("ubuntu").await
 }
 
 pub fn is_outdated(vm: &VMResult, eol_list: &Vec<EOLEntity>) -> String {
@@ -36,5 +36,11 @@ pub fn parse_azure_version(az_version: &String) -> Option<String> {
     if parts.is_empty() {
         return None;
     }
-    return Some(parts[0].to_string());
+    let first = parts[0];
+    let parts: Vec<&str> = first.split("_").collect();
+    if parts.len() == 2 {
+        let version = format!("{}.{}", parts[0], parts[1]);
+        return Some(version);
+    }
+    Some(String::from(first))
 }
