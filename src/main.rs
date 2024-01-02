@@ -2,18 +2,19 @@ mod eol_detection;
 mod vmresult;
 
 use azure_identity::AzureCliCredential;
+use clap::Parser;
 use futures::stream::StreamExt;
-use tokio::sync::mpsc::{Receiver, Sender};
+use paris::{error, info, Logger};
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::process::exit;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, Mutex};
 use xlsxwriter::prelude::*;
-use paris::{Logger, error};
-use clap::Parser;
 
+use eol_detection::{centos, redhat, ubuntu, windows};
 use vmresult::VMResult;
-use eol_detection::{centos, windows, ubuntu, redhat};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -54,16 +55,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         OutputType::UNKNOWN => {
             error!("Unknown output format specified");
             return Ok(());
-        },
-        _ => {},
+        }
+        _ => {}
     };
     let mut log = Logger::new();
     log.info("Detecting credentials");
-    
 
     let credential = std::sync::Arc::new(AzureCliCredential::new());
     let tenant = AzureCliCredential::get_tenant()?;
-    log.loading(format!("Listing VMs in tenant {}", tenant));
+    log.info(format!("Listing VMs in tenant {}", tenant));
 
     let subscription_client = azure_mgmt_subscription::Client::builder(credential.clone()).build();
     let client = azure_mgmt_compute::Client::builder(credential).build();
@@ -79,32 +79,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Ok(subs) = subs {
                 for sub in subs.value {
                     let sub_id = sub.subscription_id.unwrap_or_default();
-                    // info!("> Listing VMs for {}", &sub_id);
+                    let sub_name = sub.display_name.unwrap_or_default();
+                    Logger::new().info(format!("Listing subscription {} ({})", &sub_name, &sub_id));
                     list_vms(&sub_id, &client, &tx).await;
                 }
             }
-        }).await;
+        })
+        .await;
         log.done();
     });
 
     match args.format {
         OutputType::CSV => {
             write_to_csv(&mut rx, args.out).await?;
-        },
+        }
         OutputType::EXCEL => {
             write_to_excel(&mut rx, args.out).await?;
-        },
+        }
         _ => {}
     };
 
-    
     let mut log = Logger::new();
     log.success("Done!");
 
     Ok(())
 }
 
-async fn list_vms(subscription_id: &String, client: &azure_mgmt_compute::Client, tx: &Mutex<Sender<VMResult>>) {
+async fn list_vms(
+    subscription_id: &String,
+    client: &azure_mgmt_compute::Client,
+    tx: &Mutex<Sender<VMResult>>,
+) {
     let vms = client
         .virtual_machines_client()
         .list_all(subscription_id)
@@ -115,33 +120,54 @@ async fn list_vms(subscription_id: &String, client: &azure_mgmt_compute::Client,
                 let properties = match vm.properties {
                     Some(p) => p,
                     None => {
-                        error!("No properties found for: {}", vm.resource.id.unwrap_or_default());
+                        error!(
+                            "No properties found for: {}",
+                            vm.resource.id.unwrap_or_default()
+                        );
                         continue;
-                    },
+                    }
                 };
                 let storage_profile = match properties.storage_profile {
                     Some(p) => p,
                     None => {
-                        error!("No storage profile found for: {}", vm.resource.id.unwrap_or_default());
+                        error!(
+                            "No storage profile found for: {}",
+                            vm.resource.id.unwrap_or_default()
+                        );
                         continue;
-                    },
+                    }
                 };
                 let image_info = {
                     if let Some(r) = storage_profile.image_reference {
-                        (r.sku.unwrap_or_default(), r.publisher.unwrap_or_default(), r.offer.unwrap_or_default(), r.version.unwrap_or_default(), r.exact_version.unwrap_or_default())
+                        (
+                            r.sku.unwrap_or_default(),
+                            r.publisher.unwrap_or_default(),
+                            r.offer.unwrap_or_default(),
+                            r.version.unwrap_or_default(),
+                            r.exact_version.unwrap_or_default(),
+                        )
                     } else {
-                        ("".to_string(), "".to_string(), "".to_string(), "".to_string(), "".to_string())
+                        (
+                            "".to_string(),
+                            "".to_string(),
+                            "".to_string(),
+                            "".to_string(),
+                            "".to_string(),
+                        )
                     }
                 };
                 let os_disk = match storage_profile.os_disk {
                     Some(p) => p,
                     None => {
-                        error!("No OS disk found for: {}", vm.resource.id.unwrap_or_default());
+                        error!(
+                            "No OS disk found for: {}",
+                            vm.resource.id.unwrap_or_default()
+                        );
                         continue;
-                    },
+                    }
                 };
                 let sku = image_info.0;
-                
+
                 let resource_id = vm.resource.id.unwrap_or_default();
                 // info!("Found VM: {}", &resource_id);
                 let machine = VMResult {
@@ -162,7 +188,10 @@ async fn list_vms(subscription_id: &String, client: &azure_mgmt_compute::Client,
     .await;
 }
 
-async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn write_to_excel(
+    rx: &mut Receiver<VMResult>,
+    file: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     let ubuntu_eol = ubuntu::list().await?;
     let centos_eol = centos::list().await?;
     let windows_eol = windows::list().await?;
@@ -171,25 +200,44 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
     let workbook = Workbook::new_with_options(file.to_str().unwrap(), true, None, false)?;
     let mut sheet = workbook.add_worksheet(None)?;
 
-    let header_format = Format::new().set_bold().set_bg_color(FormatColor::Gray).set_font_color(FormatColor::White).set_border_bottom(FormatBorder::Medium).clone();
+    let header_format = Format::new()
+        .set_bold()
+        .set_bg_color(FormatColor::Gray)
+        .set_font_color(FormatColor::White)
+        .set_border_bottom(FormatBorder::Medium)
+        .clone();
     let header_format = Some(&header_format);
-    let eol_style = Format::new().set_bold().set_bg_color(FormatColor::Custom(0xF5_CA_C9)).set_font_color(FormatColor::Custom(0x8D_20_12)).clone();
+    let eol_style = Format::new()
+        .set_bold()
+        .set_bg_color(FormatColor::Custom(0xF5_CA_C9))
+        .set_font_color(FormatColor::Custom(0x8D_20_12))
+        .clone();
     let eol_style = Some(&eol_style);
-    let unknown_style = Format::new().set_bold().set_bg_color(FormatColor::Custom(0xFA_EC_A2)).set_font_color(FormatColor::Custom(0x915C17)).clone();
+    let unknown_style = Format::new()
+        .set_bold()
+        .set_bg_color(FormatColor::Custom(0xFA_EC_A2))
+        .set_font_color(FormatColor::Custom(0x915C17))
+        .clone();
     let unknown_style = Some(&unknown_style);
-    let green_style = Format::new().set_bold().set_bg_color(FormatColor::Custom(0xCF_ED_CF)).set_font_color(FormatColor::Custom(0x295F10)).clone();
+    let green_style = Format::new()
+        .set_bold()
+        .set_bg_color(FormatColor::Custom(0xCF_ED_CF))
+        .set_font_color(FormatColor::Custom(0x295F10))
+        .clone();
     let green_style = Some(&green_style);
 
     sheet.write_string(0, 0, "Detected version", header_format)?;
     sheet.write_string(0, 1, "Deprecated", header_format)?;
-    sheet.write_string(0, 2, "OS", header_format)?;
-    sheet.write_string(0, 3, "Subscription", header_format)?;
-    sheet.write_string(0, 4, "Offer", header_format)?;
-    sheet.write_string(0, 5, "SKU", header_format)?;
-    sheet.write_string(0, 6, "Version", header_format)?;
-    sheet.write_string(0, 7, "Version exact", header_format)?;
-    sheet.write_string(0, 8, "Publisher", header_format)?;
-    sheet.write_string(0, 9, "Resource ID", header_format)?;
+    sheet.write_string(0, 2, "Resource Group", header_format)?;
+    sheet.write_string(0, 3, "Resource", header_format)?;
+    sheet.write_string(0, 4, "OS", header_format)?;
+    sheet.write_string(0, 5, "Subscription", header_format)?;
+    sheet.write_string(0, 6, "Offer", header_format)?;
+    sheet.write_string(0, 7, "SKU", header_format)?;
+    sheet.write_string(0, 8, "Version", header_format)?;
+    sheet.write_string(0, 9, "Version exact", header_format)?;
+    sheet.write_string(0, 10, "Publisher", header_format)?;
+    sheet.write_string(0, 11, "Resource ID", header_format)?;
 
     let mut row_idx = 1;
     while let Some(vm) = rx.recv().await {
@@ -220,6 +268,8 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
                 eol_style
             } else if version_info.1 == "Supported" {
                 green_style
+            } else if version_info.1.contains("Ending") {
+                unknown_style
             } else {
                 unknown_style
             }
@@ -233,16 +283,25 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
             }
         };
 
+        let vm_id = vm.id.clone();
+        let parts: Vec<&str> = vm_id.split("/").collect();
+        // println!("{:#?}", parts);
+
+        let resource_group = parts[4];
+        let resource = parts.last().unwrap();
+
         sheet.write_string(row_idx, 0, &version_info.0, None)?;
         sheet.write_string(row_idx, 1, &version_info.1, deprecated_sytle)?;
-        sheet.write_string(row_idx, 2, &os_type.as_str(), None)?;
-        sheet.write_string(row_idx, 3, &vm.subscription_id, None)?;
-        sheet.write_string(row_idx, 4, &vm.offer, None)?;
-        sheet.write_string(row_idx, 5, &vm.sku, None)?;
-        sheet.write_string(row_idx, 6, &vm.version, None)?;
-        sheet.write_string(row_idx, 7, &vm.exact_version, None)?;
-        sheet.write_string(row_idx, 8, &vm.publisher, None)?;
-        sheet.write_string(row_idx, 9, &vm.id, None)?;
+        sheet.write_string(row_idx, 2, resource_group, None)?;
+        sheet.write_string(row_idx, 3, resource, None)?;
+        sheet.write_string(row_idx, 4, &os_type.as_str(), None)?;
+        sheet.write_string(row_idx, 5, &vm.subscription_id, None)?;
+        sheet.write_string(row_idx, 6, &vm.offer, None)?;
+        sheet.write_string(row_idx, 7, &vm.sku, None)?;
+        sheet.write_string(row_idx, 8, &vm.version, None)?;
+        sheet.write_string(row_idx, 9, &vm.exact_version, None)?;
+        sheet.write_string(row_idx, 10, &vm.publisher, None)?;
+        sheet.write_string(row_idx, 11, &vm.id, None)?;
 
         row_idx += 1;
     }
@@ -251,7 +310,10 @@ async fn write_to_excel(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<()
     Ok(())
 }
 
-async fn write_to_csv(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+async fn write_to_csv(
+    rx: &mut Receiver<VMResult>,
+    file: PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(file)?;
     let mut f = BufWriter::new(file);
     f.write(VMResult::csv_header_line().as_bytes())?;
@@ -281,7 +343,16 @@ async fn write_to_csv(rx: &mut Receiver<VMResult>, file: PathBuf) -> Result<(), 
 
         let line = format!(
             "{};{};{};{:?};{};{};{};{};{};{}\n",
-            version_info.0, version_info.1, vm.id, vm.os_type, vm.subscription_id, vm.publisher, vm.offer, vm.sku, vm.version, vm.exact_version
+            version_info.0,
+            version_info.1,
+            vm.id,
+            vm.os_type,
+            vm.subscription_id,
+            vm.publisher,
+            vm.offer,
+            vm.sku,
+            vm.version,
+            vm.exact_version
         );
         f.write(line.as_bytes())?;
     }
